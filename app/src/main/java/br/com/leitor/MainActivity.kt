@@ -201,6 +201,10 @@ class MainActivity : ComponentActivity() {
                             else -> "href"
                         }
                         node.attr(attr, resolveResource(path, node.attr(attr), root))
+                        if (node.normalName() == "img") {
+                            node.attr("loading", "lazy")
+                            node.attr("decoding", "async")
+                        }
                     }
                     body.select("[style]").forEach { node -> node.attr("style", rebaseCss(node.attr("style"), path, root)) }
                     body.select("a[href]").forEach { link ->
@@ -273,7 +277,26 @@ body * { color: #f5f1e8 !important; background-color: transparent !important; }
 p { margin: 0 0 1.15em; text-indent: 1.2em; } h1,h2,h3,h4,h5,h6 { line-height: 1.25; margin: 1.4em 0 .7em; }
 img,svg,video { max-width: 100%; height: auto; } table { max-width:100%; } a, a * { color: #f2c230 !important; }
 blockquote { margin-left: 1em; padding-left: 1em; border-left: 3px solid #d1ad35; }
-</style></head><body><main id="reader">$content</main></body></html>
+</style></head><body><main id="reader">$content</main>
+<script>
+(() => {
+  let speed = 0, previous = 0, frame = 0;
+  const tick = now => {
+    if (speed <= 0) { frame = 0; previous = 0; return; }
+    if (previous) window.scrollBy(0, speed * (now - previous) / 1000);
+    previous = now;
+    if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 1) {
+      speed = 0; frame = 0; return;
+    }
+    frame = requestAnimationFrame(tick);
+  };
+  window.setReaderSpeed = value => {
+    speed = Math.max(0, Number(value) || 0);
+    if (speed === 0) { cancelAnimationFrame(frame); frame = 0; previous = 0; }
+    else if (!frame) { previous = 0; frame = requestAnimationFrame(tick); }
+  };
+})();
+</script></body></html>
 """
 
 private fun missingAsset() = WebResourceResponse(
@@ -313,21 +336,21 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
             scope.launch { scroll.scrollTo(0) }
         }
     }
-    LaunchedEffect(running, speed, html, pdfPages) {
-        while (running && speed > 0f && isActive && (html.isNotBlank() || pdfPages.isNotEmpty())) {
+    LaunchedEffect(running, speed, html, pdfPages, webView) {
+        if (html.isNotBlank()) {
+            val pixelsPerSecond = if (running) 34f * speed / 20f else 0f
+            webView?.evaluateJavascript("window.setReaderSpeed?.($pixelsPerSecond)", null)
+        } else while (running && speed > 0f && isActive && pdfPages.isNotEmpty()) {
             delay(16)
             val delta = 34f * speed / 20f * 0.016f
             if (pdfPages.isNotEmpty()) scroll.scrollBy(delta)
-            else webView?.evaluateJavascript("(()=>{window.scrollBy(0,$delta);return window.scrollY+window.innerHeight>=document.documentElement.scrollHeight-1})()") { atEnd ->
-                if (atEnd == "true") running = false
-            }
             if (pdfPages.isNotEmpty() && scroll.value >= scroll.maxValue) running = false
         }
     }
     MaterialTheme(colorScheme = darkColorScheme(primary = Yellow, background = Ink, surface = Ink, onSurface = Paper)) {
       ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = chapters.isNotEmpty(),
+        gesturesEnabled = false,
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = Color(0xFF22221D), modifier = Modifier.width(320.dp)) {
                 Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 16.dp)) {
@@ -464,9 +487,11 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
                         factory = { context ->
                             WebView(context).apply {
                                 setBackgroundColor(AndroidColor.rgb(23, 23, 19))
+                                overScrollMode = android.view.View.OVER_SCROLL_NEVER
                                 settings.allowFileAccess = false
                                 settings.allowContentAccess = false
                                 settings.javaScriptEnabled = true
+                                settings.loadsImagesAutomatically = true
                                 webViewClient = readerClient
                                 webView = this
                             }
