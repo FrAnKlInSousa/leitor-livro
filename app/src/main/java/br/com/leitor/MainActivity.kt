@@ -8,8 +8,10 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -29,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -40,6 +43,7 @@ import org.jsoup.Jsoup
 import org.jsoup.parser.Parser
 import java.io.File
 import java.net.URI
+import java.io.ByteArrayInputStream
 import java.util.UUID
 import java.util.zip.ZipFile
 
@@ -52,6 +56,7 @@ private data class ReaderDocument(
     val title: String,
     val html: String? = null,
     val baseUrl: String? = null,
+    val assetRoot: File? = null,
     val pdfPages: List<Bitmap> = emptyList(),
     val error: String? = null,
 )
@@ -149,7 +154,7 @@ class MainActivity : ComponentActivity() {
                     doc.select("link[rel~=(?i)stylesheet][href]").forEach { link ->
                         val cssPath = resolvePath(path.substringBeforeLast('/', ""), link.attr("href").substringBefore('#'))
                         val cssFile = File(root, cssPath)
-                        if (cssFile.isFile) stylesheets += cssFile.toURI().toASCIIString()
+                        if (cssFile.isFile) stylesheets += assetUrl(cssPath)
                     }
                     doc.select("style").forEach { style ->
                         inlineStyles += rebaseCss(style.data(), path, root)
@@ -188,7 +193,12 @@ class MainActivity : ComponentActivity() {
                 }
                 val headLinks = stylesheets.joinToString("") { "<link rel=\"stylesheet\" href=\"$it\">" } +
                     inlineStyles.joinToString("") { "<style>$it</style>" }
-                ReaderDocument(title, html = htmlPage(sections.toString(), headLinks), baseUrl = root.toURI().toASCIIString())
+                ReaderDocument(
+                    title,
+                    html = htmlPage(sections.toString(), headLinks),
+                    baseUrl = "https://epub.local/epub/",
+                    assetRoot = root,
+                )
             }
         }.onSuccess(onResult).onFailure {
             onResult(ReaderDocument(title, error = "Não foi possível ler este EPUB. Verifique se o arquivo não está protegido ou corrompido."))
@@ -204,8 +214,10 @@ class MainActivity : ComponentActivity() {
         if (reference.startsWith("data:") || reference.startsWith("http:") || reference.startsWith("https:") || reference.startsWith("file:")) return reference
         val path = resolvePath(chapterPath.substringBeforeLast('/', ""), reference.substringBefore('#').substringBefore('?'))
         val file = File(root, path)
-        return if (file.isFile) file.toURI().toASCIIString() else reference
+        return if (file.isFile) assetUrl(path) else reference
     }
+
+    private fun assetUrl(path: String): String = "https://epub.local/epub/${Uri.encode(path, "/") }"
 
     private fun rebaseCss(css: String, chapterPath: String, root: File): String =
         Regex("""url\((['"]?)(.*?)\1\)""", RegexOption.IGNORE_CASE).replace(css) { match ->
@@ -224,13 +236,21 @@ private fun htmlPage(content: String, headContent: String = ""): String = """
 <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 $headContent
 <style>
-html { scroll-behavior: auto; } body { margin: 0; background: #f5f1e8; color: #25241f; font: 20px/1.72 Georgia, serif; }
+html { scroll-behavior: auto; background: #171713 !important; }
+body { margin: 0; background: #171713 !important; color: #f5f1e8 !important; font: 20px/1.72 Georgia, serif; }
+body * { color: #f5f1e8 !important; background-color: transparent !important; }
 #reader { box-sizing: border-box; max-width: 820px; margin: 0 auto; padding: 30px 26px 70px; overflow-wrap: anywhere; }
 p { margin: 0 0 1.15em; text-indent: 1.2em; } h1,h2,h3,h4,h5,h6 { line-height: 1.25; margin: 1.4em 0 .7em; }
-img,svg,video { max-width: 100%; height: auto; } table { max-width:100%; } a { color: #9a7300; }
+img,svg,video { max-width: 100%; height: auto; } table { max-width:100%; } a, a * { color: #f2c230 !important; }
 blockquote { margin-left: 1em; padding-left: 1em; border-left: 3px solid #d1ad35; }
 </style></head><body><main id="reader">$content</main></body></html>
 """
+
+private fun missingAsset() = WebResourceResponse(
+    "application/octet-stream",
+    null,
+    ByteArrayInputStream(ByteArray(0)),
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -240,19 +260,23 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
     var title by remember { mutableStateOf("O livro começa aqui") }
     var html by remember { mutableStateOf("") }
     var baseUrl by remember { mutableStateOf("file:///android_asset/") }
+    var assetRoot by remember { mutableStateOf<File?>(null) }
     var pdfPages by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
     var speed by remember { mutableFloatStateOf(0f) }
     var running by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var canNavigateBack by remember { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) open(uri) { document ->
             title = document.title
             html = document.html.orEmpty()
             baseUrl = document.baseUrl ?: "file:///android_asset/"
+            assetRoot = document.assetRoot
             pdfPages = document.pdfPages
             notice = document.error
             running = false
+            canNavigateBack = false
             scope.launch { scroll.scrollTo(0) }
         }
     }
@@ -290,6 +314,9 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
                         Text("ENTRELINHAS", color = Yellow, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
                         Text(title, color = Paper, fontSize = 13.sp, maxLines = 1)
                     }
+                    IconButton(enabled = canNavigateBack, onClick = { webView?.goBack() }) {
+                        Icon(Icons.Default.ArrowBack, "Voltar ao ponto anterior", tint = if (canNavigateBack) Yellow else Muted)
+                    }
                     IconButton(onClick = { picker.launch(arrayOf("application/epub+zip", "application/pdf", "text/plain", "text/html", "*/*")) }) {
                         Icon(Icons.Default.FolderOpen, "Abrir livro", tint = Paper)
                     }
@@ -322,29 +349,59 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
                         }
                     }
                 } else {
+                    val context = LocalContext.current
+                    val readerClient = remember(assetRoot) {
+                        object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                                val target = request.url
+                                if (target.scheme in setOf("http", "https", "mailto") && target.host != "epub.local") {
+                                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, target)) }
+                                    return true
+                                }
+                                return false
+                            }
+
+                            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                                if (request.url.host != "epub.local") return super.shouldInterceptRequest(view, request)
+                                val root = assetRoot ?: return missingAsset()
+                                return runCatching {
+                                    val relative = Uri.decode(request.url.encodedPath.orEmpty()).removePrefix("/epub/")
+                                    val rootPath = root.canonicalPath + File.separator
+                                    val file = File(root, relative).canonicalFile
+                                    if (!file.path.startsWith(rootPath) || !file.isFile) return@runCatching missingAsset()
+                                    val extension = file.extension.lowercase()
+                                    val type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+                                        ?: when (extension) {
+                                            "xhtml" -> "application/xhtml+xml"
+                                            "opf" -> "application/oebps-package+xml"
+                                            "ncx" -> "application/x-dtbncx+xml"
+                                            else -> "application/octet-stream"
+                                        }
+                                    val encoding = if (type.startsWith("text/") || type.contains("xml") || type.contains("javascript")) "UTF-8" else null
+                                    WebResourceResponse(type, encoding, file.inputStream())
+                                }.getOrElse { missingAsset() }
+                            }
+
+                            override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+                                canNavigateBack = view.canGoBack()
+                            }
+                        }
+                    }
                     AndroidView(
                         modifier = Modifier.fillMaxSize(),
                         factory = { context ->
                             WebView(context).apply {
-                                setBackgroundColor(AndroidColor.rgb(245, 241, 232))
-                                settings.allowFileAccess = true
-                                settings.allowContentAccess = true
+                                setBackgroundColor(AndroidColor.rgb(23, 23, 19))
+                                settings.allowFileAccess = false
+                                settings.allowContentAccess = false
                                 settings.javaScriptEnabled = true
-                                webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                                        val target = request.url
-                                        if (target.scheme in setOf("http", "https", "mailto")) {
-                                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, target)) }
-                                            return true
-                                        }
-                                        return false
-                                    }
-                                }
+                                webViewClient = readerClient
                                 webView = this
                             }
                         },
                         update = { view ->
-                            val marker = "${html.hashCode()}|$baseUrl"
+                            view.webViewClient = readerClient
+                            val marker = "${html.hashCode()}|$baseUrl|${assetRoot?.absolutePath}"
                             if (view.tag != marker) {
                                 view.tag = marker
                                 view.loadDataWithBaseURL(baseUrl, html, "text/html", "UTF-8", null)
