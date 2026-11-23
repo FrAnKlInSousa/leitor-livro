@@ -20,6 +20,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -41,6 +43,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.jsoup.Jsoup
 import org.jsoup.parser.Parser
+import org.json.JSONObject
 import java.io.File
 import java.net.URI
 import java.io.ByteArrayInputStream
@@ -57,9 +60,12 @@ private data class ReaderDocument(
     val html: String? = null,
     val baseUrl: String? = null,
     val assetRoot: File? = null,
+    val chapters: List<BookChapter> = emptyList(),
     val pdfPages: List<Bitmap> = emptyList(),
     val error: String? = null,
 )
+
+private data class BookChapter(val title: String, val anchor: String)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -144,6 +150,28 @@ class MainActivity : ComponentActivity() {
                     .filter { File(root, it).isFile }
                 require(spinePaths.isNotEmpty()) { "EPUB sem capítulos no spine" }
                 val chapterIdByPath = spinePaths.withIndex().associate { it.value to "chapter-${it.index}" }
+                val navPath = packageDoc.getElementsByTag("item").firstOrNull {
+                    "nav" in it.attr("properties").split(Regex("\\s+"))
+                }?.let { manifest[it.attr("id")] }
+                val chapters = navPath?.let { path ->
+                    val navDoc = Jsoup.parse(File(root, path), "UTF-8", "", Parser.xmlParser())
+                    val toc = navDoc.getElementsByTag("nav").firstOrNull {
+                        it.attr("epub:type") == "toc" || it.attr("role") == "doc-toc" || it.id() == "toc"
+                    } ?: navDoc.getElementsByTag("nav").firstOrNull()
+                    toc?.select("a[href]")?.mapNotNull { link ->
+                        val target = runCatching { URI(link.attr("href")) }.getOrNull() ?: return@mapNotNull null
+                        val targetPath = resolvePath(path.substringBeforeLast('/', ""), target.path.orEmpty())
+                        val chapterId = chapterIdByPath[targetPath] ?: return@mapNotNull null
+                        val anchor = target.fragment?.let { "$chapterId--$it" } ?: chapterId
+                        link.text().trim().takeIf(String::isNotBlank)?.let { BookChapter(it, anchor) }
+                    }.orEmpty()
+                }.orEmpty().ifEmpty {
+                    spinePaths.mapIndexedNotNull { index, path ->
+                        val doc = Jsoup.parse(File(root, path), "UTF-8", "", Parser.htmlParser())
+                        doc.selectFirst("h1")?.text()?.trim()?.takeIf(String::isNotBlank)
+                            ?.let { BookChapter(it, "chapter-$index") }
+                    }
+                }
                 val sections = StringBuilder()
                 val stylesheets = linkedSetOf<String>()
                 val inlineStyles = mutableListOf<String>()
@@ -165,10 +193,11 @@ class MainActivity : ComponentActivity() {
                         node.attr("id")?.takeIf(String::isNotBlank)?.let { node.attr("id", "$chapterId--$it") }
                         node.attr("name")?.takeIf(String::isNotBlank)?.let { node.attr("name", "$chapterId--$it") }
                     }
-                    body.select("img[src], source[src], audio[src], video[src], video[poster], image[href], use[href]").forEach { node ->
+                    body.select("img[src], source[src], audio[src], video[src], video[poster], image, use").forEach { node ->
                         val attr = when {
                             node.hasAttr("src") -> "src"
                             node.hasAttr("poster") -> "poster"
+                            node.hasAttr("xlink:href") -> "xlink:href"
                             else -> "href"
                         }
                         node.attr(attr, resolveResource(path, node.attr(attr), root))
@@ -198,6 +227,7 @@ class MainActivity : ComponentActivity() {
                     html = htmlPage(sections.toString(), headLinks),
                     baseUrl = "https://epub.local/epub/",
                     assetRoot = root,
+                    chapters = chapters,
                 )
             }
         }.onSuccess(onResult).onFailure {
@@ -261,18 +291,21 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
     var html by remember { mutableStateOf("") }
     var baseUrl by remember { mutableStateOf("file:///android_asset/") }
     var assetRoot by remember { mutableStateOf<File?>(null) }
+    var chapters by remember { mutableStateOf<List<BookChapter>>(emptyList()) }
     var pdfPages by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
     var speed by remember { mutableFloatStateOf(0f) }
     var running by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var canNavigateBack by remember { mutableStateOf(false) }
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) open(uri) { document ->
             title = document.title
             html = document.html.orEmpty()
             baseUrl = document.baseUrl ?: "file:///android_asset/"
             assetRoot = document.assetRoot
+            chapters = document.chapters
             pdfPages = document.pdfPages
             notice = document.error
             running = false
@@ -292,6 +325,39 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
         }
     }
     MaterialTheme(colorScheme = darkColorScheme(primary = Yellow, background = Ink, surface = Ink, onSurface = Paper)) {
+      ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = chapters.isNotEmpty(),
+        drawerContent = {
+            ModalDrawerSheet(drawerContainerColor = Color(0xFF22221D), modifier = Modifier.width(320.dp)) {
+                Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 16.dp)) {
+                    Text("ENTRELINHAS", color = Yellow, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Text(title, color = Paper, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(6.dp))
+                    Text("CAPÍTULOS", color = Muted, fontSize = 11.sp, letterSpacing = 1.5.sp)
+                }
+                HorizontalDivider(color = Color(0xFF393831))
+                LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                    itemsIndexed(chapters) { _, chapter ->
+                        NavigationDrawerItem(
+                            label = { Text(chapter.title, color = Paper, fontSize = 14.sp) },
+                            selected = false,
+                            onClick = {
+                                scope.launch {
+                                    drawerState.close()
+                                    val destination = JSONObject.quote("#${chapter.anchor}")
+                                    webView?.evaluateJavascript("window.location.hash=$destination", null)
+                                }
+                            },
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            colors = NavigationDrawerItemDefaults.colors(unselectedContainerColor = Color.Transparent),
+                        )
+                    }
+                }
+            }
+        },
+      ) {
         Scaffold(containerColor = Ink, bottomBar = {
             Column(Modifier.fillMaxWidth().background(Color(0xFF22221D)).padding(horizontal = 22.dp, vertical = 14.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -313,6 +379,9 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
                     Column(Modifier.weight(1f)) {
                         Text("ENTRELINHAS", color = Yellow, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
                         Text(title, color = Paper, fontSize = 13.sp, maxLines = 1)
+                    }
+                    IconButton(enabled = chapters.isNotEmpty(), onClick = { scope.launch { drawerState.open() } }) {
+                        Icon(Icons.Default.Menu, "Capítulos", tint = if (chapters.isNotEmpty()) Paper else Muted)
                     }
                     IconButton(enabled = canNavigateBack, onClick = { webView?.goBack() }) {
                         Icon(Icons.Default.ArrowBack, "Voltar ao ponto anterior", tint = if (canNavigateBack) Yellow else Muted)
@@ -362,7 +431,10 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
                             }
 
                             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                                if (request.url.host != "epub.local") return super.shouldInterceptRequest(view, request)
+                                if (request.url.host != "epub.local") {
+                                    return if (request.url.scheme == "http" || request.url.scheme == "https") missingAsset()
+                                    else super.shouldInterceptRequest(view, request)
+                                }
                                 val root = assetRoot ?: return missingAsset()
                                 return runCatching {
                                     val relative = Uri.decode(request.url.encodedPath.orEmpty()).removePrefix("/epub/")
@@ -411,5 +483,6 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
                 }
             }
         }
+      }
     }
 }
