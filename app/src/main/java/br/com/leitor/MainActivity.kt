@@ -295,16 +295,23 @@ blockquote { margin-left: 1em; padding-left: 1em; border-left: 3px solid #d1ad35
 </style></head><body><main id="reader">$content</main>
 <script>
 (() => {
-  const imageObserver = new IntersectionObserver(entries => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      const image = entry.target;
-      image.src = image.dataset.readerSrc;
+  let imageCheckTimer = 0;
+  const loadNearbyImages = () => {
+    imageCheckTimer = 0;
+    const limit = window.innerHeight + 1000;
+    document.querySelectorAll('img[data-reader-src]').forEach(image => {
+      const rect = image.getBoundingClientRect();
+      if (rect.bottom < -1000 || rect.top > limit) return;
+      image.src = image.getAttribute('data-reader-src');
       image.removeAttribute('data-reader-src');
-      imageObserver.unobserve(image);
-    }
-  }, { rootMargin: '1200px 0px' });
-  document.querySelectorAll('img[data-reader-src]').forEach(image => imageObserver.observe(image));
+    });
+  };
+  const scheduleImageCheck = () => {
+    if (!imageCheckTimer) imageCheckTimer = window.setTimeout(loadNearbyImages, 100);
+  };
+  window.addEventListener('scroll', scheduleImageCheck, { passive: true });
+  window.addEventListener('resize', scheduleImageCheck, { passive: true });
+  loadNearbyImages();
 
   let speed = 0, previous = 0, frame = 0;
   const tick = now => {
@@ -376,7 +383,7 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Yellow, background = Ink, surface = Ink, onSurface = Paper)) {
       ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = chapters.isNotEmpty(),
+        gesturesEnabled = false,
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = Color(0xFF22221D), modifier = Modifier.width(320.dp)) {
                 Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 16.dp)) {
