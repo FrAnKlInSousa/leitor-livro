@@ -2,6 +2,7 @@ package br.com.leitor
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
@@ -200,9 +201,23 @@ class MainActivity : ComponentActivity() {
                             node.hasAttr("xlink:href") -> "xlink:href"
                             else -> "href"
                         }
-                        node.attr(attr, resolveResource(path, node.attr(attr), root))
-                        if (node.normalName() == "img") {
-                            node.attr("loading", "lazy")
+                        val reference = node.attr(attr)
+                        val resolvedResource = resolveResource(path, reference, root)
+                        node.attr(attr, resolvedResource)
+                        if (node.normalName() == "img" && resolvedResource.startsWith("https://epub.local/epub/")) {
+                            val localPath = Uri.decode(Uri.parse(resolvedResource).encodedPath.orEmpty().removePrefix("/epub/"))
+                            val imageFile = File(root, localPath)
+                            if ((!node.hasAttr("width") || !node.hasAttr("height")) && imageFile.isFile) {
+                                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                BitmapFactory.decodeFile(imageFile.absolutePath, bounds)
+                                if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                                    if (!node.hasAttr("width")) node.attr("width", bounds.outWidth.toString())
+                                    if (!node.hasAttr("height")) node.attr("height", bounds.outHeight.toString())
+                                }
+                            }
+                            node.attr("data-reader-src", resolvedResource)
+                            node.attr("src", "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=")
+                            node.removeAttr("loading")
                             node.attr("decoding", "async")
                         }
                     }
@@ -280,6 +295,17 @@ blockquote { margin-left: 1em; padding-left: 1em; border-left: 3px solid #d1ad35
 </style></head><body><main id="reader">$content</main>
 <script>
 (() => {
+  const imageObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const image = entry.target;
+      image.src = image.dataset.readerSrc;
+      image.removeAttribute('data-reader-src');
+      imageObserver.unobserve(image);
+    }
+  }, { rootMargin: '1200px 0px' });
+  document.querySelectorAll('img[data-reader-src]').forEach(image => imageObserver.observe(image));
+
   let speed = 0, previous = 0, frame = 0;
   const tick = now => {
     if (speed <= 0) { frame = 0; previous = 0; return; }
@@ -350,7 +376,7 @@ private fun ReaderApp(open: (Uri, (ReaderDocument) -> Unit) -> Unit) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Yellow, background = Ink, surface = Ink, onSurface = Paper)) {
       ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = false,
+        gesturesEnabled = chapters.isNotEmpty(),
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = Color(0xFF22221D), modifier = Modifier.width(320.dp)) {
                 Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 16.dp)) {
